@@ -1585,6 +1585,50 @@ async def list_tools() -> List[Tool]:
             }
         ),
         
+        # === GROQ TRIPLE INGESTION (DataIngestion) ===
+        Tool(
+            name="ingest_text",
+            description="Extract semantic triples from raw text via Groq and store as atoms. Use for pasted chat logs, notes, transcripts. Requires GROQ_API_KEY (falls back to Ollama).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Raw text to extract triples from (min 20 chars)"},
+                    "domain": {"type": "string", "description": "Knowledge domain tag (default: general)"},
+                    "source": {"type": "string", "description": "Source label (default: user_input)"},
+                    "max_triples": {"type": "integer", "description": "default 15"},
+                },
+                "required": ["text"]
+            }
+        ),
+
+        Tool(
+            name="ingest_url",
+            description="Fetch a URL, extract semantic triples via Groq, store as atoms. Requires GROQ_API_KEY (falls back to Ollama).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "domain": {"type": "string", "description": "Knowledge domain tag (default: general)"},
+                    "max_triples": {"type": "integer", "description": "default 15"},
+                },
+                "required": ["url"]
+            }
+        ),
+
+        Tool(
+            name="ingest_file",
+            description="Read a local file (.txt/.md/.csv/.json/.rst/.log), extract semantic triples via Groq, store as atoms. Requires GROQ_API_KEY (falls back to Ollama).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Absolute or relative path to the file"},
+                    "domain": {"type": "string", "description": "Knowledge domain tag (default: general)"},
+                    "max_triples": {"type": "integer", "description": "default 20"},
+                },
+                "required": ["file_path"]
+            }
+        ),
+
         # === ARXIV INGESTION (Real Provenance) ===
         Tool(
             name="ingest_arxiv",
@@ -2611,6 +2655,9 @@ def _build_dispatch_table():
         "inject_entropy_temporal": handle_inject_entropy_temporal,
         "entropy_stats": handle_entropy_stats,
         # --- ArXiv (inline) ---
+        "ingest_text": handle_ingest_text,
+        "ingest_url": handle_ingest_url,
+        "ingest_file": handle_ingest_file,
         "ingest_arxiv": handle_ingest_arxiv,
         "search_arxiv": handle_search_arxiv,
         "arxiv_history": handle_arxiv_history,
@@ -4687,6 +4734,50 @@ def get_arxiv_ingestion():
         from src.learning.arxiv_ingestion import ArxivIngestion
         _arxiv_ingestion = ArxivIngestion(store)
     return _arxiv_ingestion
+
+
+_data_ingestion = None
+
+def get_data_ingestion():
+    global _data_ingestion
+    if _data_ingestion is None:
+        from src.analysis.data_ingestion import DataIngestion
+        _data_ingestion = DataIngestion()
+    return _data_ingestion
+
+
+async def handle_ingest_text(args: Dict[str, Any]) -> List[TextContent]:
+    """Extract triples from raw text via Groq (sync -> thread)."""
+    result = await asyncio.to_thread(
+        get_data_ingestion().ingest_text,
+        args["text"],
+        args.get("domain", "general"),
+        args.get("source", "user_input"),
+        int(args.get("max_triples", 15)),
+    )
+    return [TextContent(type="text", text=compact_json(result))]
+
+
+async def handle_ingest_url(args: Dict[str, Any]) -> List[TextContent]:
+    """Fetch URL and extract triples via Groq (sync -> thread)."""
+    result = await asyncio.to_thread(
+        get_data_ingestion().ingest_url,
+        args["url"],
+        args.get("domain", "general"),
+        int(args.get("max_triples", 15)),
+    )
+    return [TextContent(type="text", text=compact_json(result))]
+
+
+async def handle_ingest_file(args: Dict[str, Any]) -> List[TextContent]:
+    """Read file and extract triples via Groq (sync -> thread)."""
+    result = await asyncio.to_thread(
+        get_data_ingestion().ingest_file,
+        args["file_path"],
+        args.get("domain", "general"),
+        int(args.get("max_triples", 20)),
+    )
+    return [TextContent(type="text", text=compact_json(result))]
 
 
 async def handle_ingest_arxiv(args: Dict[str, Any]) -> List[TextContent]:

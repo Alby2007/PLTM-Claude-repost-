@@ -69,11 +69,22 @@ def _fetch_url(url: str, timeout: int = 15) -> str:
         return resp.read().decode("utf-8", errors="replace")
 
 
+_ROUTER = None
+
+
+def _get_router():
+    """Lazy shared ModelRouter (avoids _ensure_tables DDL + ollama ping per call)."""
+    global _ROUTER
+    if _ROUTER is None:
+        from src.analysis.model_router import ModelRouter
+        _ROUTER = ModelRouter()
+    return _ROUTER
+
+
 def _extract_triples_via_groq(text: str, domain: str, source: str,
                                 max_triples: int = 15) -> List[Dict]:
     """Use Groq to extract semantic triples from text."""
-    from src.analysis.model_router import ModelRouter
-    router = ModelRouter()
+    router = _get_router()
 
     # Truncate text to fit context window
     text = text[:6000]
@@ -124,18 +135,52 @@ Text:
 
     try:
         triples = json.loads(json_match.group())
-        return [t for t in triples if isinstance(t, dict) and "s" in t and "p" in t and "o" in t]
+        raw = [t for t in triples if isinstance(t, dict) and "s" in t and "p" in t and "o" in t]
+        return _filter_triples(raw, text)
     except (json.JSONDecodeError, TypeError):
         return []
 
 
+_PLACEHOLDER = {"subject", "predicate", "object", "s", "p", "o", "entity", "value"}
+
+
+def _filter_triples(triples: List[Dict], text: str) -> List[Dict]:
+    """Drop garbage triples: prompt-echo placeholders and subjects with no
+    grounding in the source text (small LLMs echo the prompt examples)."""
+    text_l = text.lower()
+    kept = []
+    for t in triples:
+        s, p, o = (str(t.get(k, "")).strip() for k in "spo")
+        if not s or not p or not o:
+            continue
+        if s.lower() in _PLACEHOLDER or p.lower() in _PLACEHOLDER:
+            continue
+        # Subject grounding: at least one >3-char word must appear in source
+        words = [w for w in re.split(r"[_\s]+", s.lower()) if len(w) > 3]
+        if words and not any(w in text_l for w in words):
+            continue
+        kept.append(t)
+    return kept
+
+
 def _store_triples(triples: List[Dict], domain: str, source: str,
                    source_type: str, confidence: float = 0.8) -> Dict:
-    """Store extracted triples as PLTM atoms."""
-    db_path = Path(__file__).parent.parent.parent / "data" / "pltm_mcp.db"
-    conn = sqlite3.connect(str(db_path))
+    """Store extracted triples as PLTM atoms.
+
+    SafetyJudge screens each triple — raw INSERT bypasses the memory jury,
+    so SSNs/passwords/valid card numbers must be filtered here or PII would
+    land in the store unchecked.
+    """
+    from src.db_config import get_db_path
+    from src.memory.memory_jury import SafetyJudge, Verdict
+    safety = SafetyJudge()
+
+    conn = sqlite3.connect(str(get_db_path()))
+    conn.execute("PRAGMA busy_timeout=2000")  # fail fast — sync writer in async loop
 
     stored = 0
+    skipped_dupes = 0
+    skipped_safety = 0
     for t in triples:
         atom_id = str(uuid4())
         subject = str(t.get("s", ""))[:200]
@@ -143,6 +188,10 @@ def _store_triples(triples: List[Dict], domain: str, source: str,
         obj = str(t.get("o", ""))[:500]
 
         if not subject or not predicate or not obj:
+            continue
+
+        if safety.evaluate(f"{subject} {predicate} {obj}").verdict == Verdict.REJECT:
+            skipped_safety += 1
             continue
 
         metadata = json.dumps({
@@ -163,12 +212,28 @@ def _store_triples(triples: List[Dict], domain: str, source: str,
                 (atom_id, subject, predicate, obj, confidence, now, now, metadata)
             )
             stored += 1
+        except sqlite3.IntegrityError:
+            skipped_dupes += 1  # UNIQUE(subject,predicate,object,graph) — reassertion
         except Exception as e:
             logger.warning(f"Failed to store triple: {e}")
 
     conn.commit()
     conn.close()
-    return {"stored": stored, "total_extracted": len(triples)}
+    return {"stored": stored, "total_extracted": len(triples),
+            "skipped_dupes": skipped_dupes, "skipped_safety": skipped_safety}
+
+
+def _llm_note(result: Dict) -> Dict:
+    """If nothing was extracted, explain why (missing keys beats silent zeros)."""
+    if result.get("extracted", result.get("total_extracted", 0)):
+        return result
+    router = _get_router()
+    ok = [p for p in router.get_available_providers()
+          if p["status"] == "available" and p["id"] in ("groq", "ollama")]
+    if not ok:
+        result["note"] = ("No LLM available — set GROQ_API_KEY or start "
+                          "Ollama; extraction returned 0 triples")
+    return result
 
 
 class DataIngestion:
@@ -188,15 +253,17 @@ class DataIngestion:
             triples = _extract_triples_via_groq(text, domain, url, max_triples)
             result = _store_triples(triples, domain, url, "url")
 
-            return {
+            return _llm_note({
                 "ok": True,
                 "source": url,
                 "domain": domain,
                 "text_length": len(text),
                 "triples": result["stored"],
                 "extracted": result["total_extracted"],
+                "skipped_dupes": result["skipped_dupes"],
+                "skipped_safety": result["skipped_safety"],
                 "sample": triples[:3] if triples else [],
-            }
+            })
         except Exception as e:
             return {"ok": False, "err": str(e)[:200], "source": url}
 
@@ -209,15 +276,17 @@ class DataIngestion:
         triples = _extract_triples_via_groq(text, domain, source, max_triples)
         result = _store_triples(triples, domain, source, "text")
 
-        return {
+        return _llm_note({
             "ok": True,
             "source": source,
             "domain": domain,
             "text_length": len(text),
             "triples": result["stored"],
             "extracted": result["total_extracted"],
+            "skipped_dupes": result["skipped_dupes"],
+            "skipped_safety": result["skipped_safety"],
             "sample": triples[:3] if triples else [],
-        }
+        })
 
     def ingest_file(self, file_path: str, domain: str = "general",
                     max_triples: int = 20) -> Dict:
@@ -244,15 +313,17 @@ class DataIngestion:
             triples = _extract_triples_via_groq(text, domain, str(path.name), max_triples)
             result = _store_triples(triples, domain, str(path), "file")
 
-            return {
+            return _llm_note({
                 "ok": True,
                 "source": str(path),
                 "domain": domain,
                 "file_size": path.stat().st_size,
                 "triples": result["stored"],
                 "extracted": result["total_extracted"],
+                "skipped_dupes": result["skipped_dupes"],
+                "skipped_safety": result["skipped_safety"],
                 "sample": triples[:3] if triples else [],
-            }
+            })
         except Exception as e:
             return {"ok": False, "err": str(e)[:200]}
 

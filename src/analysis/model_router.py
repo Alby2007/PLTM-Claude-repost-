@@ -111,7 +111,10 @@ class ModelRouter:
     }
     
     def __init__(self, db_path: Optional[Path] = None):
-        self.db_path = db_path or Path(__file__).parent.parent.parent / "data" / "pltm_mcp.db"
+        if db_path is None:
+            from src.db_config import get_db_path
+            db_path = Path(get_db_path())
+        self.db_path = db_path
         self.timeout = 120
         self._ensure_tables()
     
@@ -268,6 +271,22 @@ class ModelRouter:
     def _call_ollama(self, pconfig: Dict, model: str, prompt: str,
                      system_prompt: Optional[str], temperature: float, max_tokens: int) -> Dict:
         """Call Ollama local API"""
+        # Fall back to an actually-pulled model when the configured default
+        # isn't installed — otherwise every call 404s and extraction
+        # silently returns nothing.
+        try:
+            req = urllib.request.Request(
+                f"{pconfig['base_url']}/api/tags",
+                headers={"User-Agent": "PLTM/2.0"})
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                pulled = [m["name"] for m in
+                          json.loads(resp.read()).get("models", [])]
+            if pulled and model not in pulled:
+                model = pulled[0]
+                logger.info(f"Ollama model not pulled; using {model}")
+        except Exception:
+            pass  # proceed with configured model — call itself will error
+
         payload = {
             "model": model,
             "prompt": prompt,
