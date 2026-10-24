@@ -86,7 +86,8 @@ class ActiveLearningEngine:
         self.db_path = db_path or Path(__file__).parent.parent.parent / "data" / "pltm_mcp.db"
         self._conn: Optional[aiosqlite.Connection] = None
         self._store = None
-        self._llm_enabled = bool(os.getenv("ANTHROPIC_API_KEY", ""))
+        from src.analysis.model_router import any_llm_available
+        self._llm_enabled = any_llm_available()
 
     async def connect(self, store=None):
         """Open DB connection and ensure tables."""

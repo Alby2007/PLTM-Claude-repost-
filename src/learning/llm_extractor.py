@@ -52,19 +52,26 @@ class LLMKnowledgeExtractor:
     
     def __init__(self, model: str = "claude-sonnet-4-20250514"):
         self.model = model
-        self.api_key = os.getenv("ANTHROPIC_API_KEY", "")
-        self.enabled = bool(self.api_key)
-        
+        self._enabled: Optional[bool] = None  # resolved on first use
+
         self.extraction_stats = {
             "llm_text": 0,
             "llm_paper": 0,
             "failed": 0,
         }
-        
-        if not self.enabled:
-            logger.warning("ANTHROPIC_API_KEY not set - LLM extraction disabled")
-        else:
-            logger.info("LLMKnowledgeExtractor initialized")
+
+    @property
+    def enabled(self) -> bool:
+        """Any usable LLM provider (Groq/Anthropic/etc. or local Ollama)."""
+        if self._enabled is None:
+            try:
+                from src.analysis.model_router import ModelRouter
+                self._enabled = ModelRouter().route("extraction") is not None
+            except Exception:
+                self._enabled = False
+            if not self._enabled:
+                logger.warning("No LLM provider available - LLM extraction disabled")
+        return self._enabled
     
     async def extract_from_text(
         self,
@@ -165,21 +172,28 @@ Rules:
     
     # ========== LLM CALL ==========
     
+    def _router(self):
+        if getattr(self, "_model_router", None) is None:
+            from src.analysis.model_router import ModelRouter
+            self._model_router = ModelRouter()
+        return self._model_router
+
     async def _call_llm(self, prompt: str, max_tokens: int = 500) -> str:
-        """Call Claude API with token-efficient settings"""
+        """Call via ModelRouter — Groq first (free tier), provider fallback."""
         try:
-            import anthropic
-            
-            client = anthropic.Anthropic(api_key=self.api_key)
-            
-            message = client.messages.create(
-                model=self.model,
-                max_tokens=max_tokens,
+            import asyncio
+
+            result = await asyncio.to_thread(
+                self._router().call,
+                prompt=prompt,
+                task_type="extraction",
                 temperature=0.0,
-                messages=[{"role": "user", "content": prompt}]
+                max_tokens=max_tokens,
             )
-            
-            return message.content[0].text
+            if result.get("ok"):
+                return result.get("text", "{}")
+            logger.error(f"LLM extraction call failed: {result.get('err', '?')}")
+            return "{}"
         except Exception as e:
             logger.error(f"LLM extraction call failed: {e}")
             return "{}"

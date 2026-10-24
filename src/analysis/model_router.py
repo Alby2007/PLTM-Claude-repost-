@@ -23,6 +23,21 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 
+def any_llm_available() -> bool:
+    """True if any LLM provider can serve requests — env key or local Ollama."""
+    if any(os.environ.get(p["env_key"]) for p in ModelRouter.PROVIDERS.values()
+           if p["env_key"]):
+        return True
+    try:
+        req = urllib.request.Request(
+            "http://localhost:11434/api/tags",
+            headers={"User-Agent": "PLTM/2.0"})
+        with urllib.request.urlopen(req, timeout=2):
+            return True
+    except Exception:
+        return False
+
+
 class ModelRouter:
     """Route LLM tasks to appropriate model based on complexity, cost, privacy."""
     

@@ -91,9 +91,11 @@ class UniversalLearningSystem:
         self.store = store
         self.conflict_detector = ConflictDetector(store)
         
-        # LLM-powered extraction (primary when API key available)
+        # LLM-powered extraction (primary when any provider is reachable —
+        # Groq/Anthropic/etc. key or local Ollama; routed via ModelRouter)
         self._llm_extractor = None
-        self._llm_enabled = bool(os.getenv("ANTHROPIC_API_KEY", ""))
+        from src.analysis.model_router import any_llm_available
+        self._llm_enabled = any_llm_available()
         
         # Extraction patterns for different content types (regex fallback)
         self.fact_patterns = [
@@ -144,6 +146,12 @@ class UniversalLearningSystem:
         # Extract knowledge - LLM primary, regex fallback
         if self._llm_enabled:
             facts, concepts, relationships = await self._extract_with_llm(content, source_type.value if source_type else "general")
+            if not facts and not concepts:
+                # Weak/echoing local model or parse failure — don't lose
+                # the extraction entirely, run the regex extractors too.
+                facts = await self._extract_facts(content, url, source_type)
+                concepts = await self._extract_concepts(content, url)
+                relationships = await self._extract_relationships(content)
         else:
             facts = await self._extract_facts(content, url, source_type)
             concepts = await self._extract_concepts(content, url)
@@ -230,6 +238,10 @@ class UniversalLearningSystem:
         # Extract research-specific knowledge - LLM primary, regex fallback
         if self._llm_enabled:
             findings, methods, results = await self._extract_paper_with_llm(title, abstract, content)
+            if not findings and not methods and not results:
+                findings = await self._extract_research_findings(abstract, content)
+                methods = await self._extract_methodologies(content)
+                results = await self._extract_experimental_results(content)
         else:
             findings = await self._extract_research_findings(abstract, content)
             methods = await self._extract_methodologies(content)

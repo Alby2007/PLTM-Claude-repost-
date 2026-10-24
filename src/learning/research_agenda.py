@@ -62,7 +62,8 @@ class ResearchAgenda:
     def __init__(self, store: SQLiteGraphStore):
         self.store = store
         self._initialized = False
-        self._llm_enabled = bool(os.getenv("ANTHROPIC_API_KEY", ""))
+        from src.analysis.model_router import any_llm_available
+        self._llm_enabled = any_llm_available()
         
         logger.info("ResearchAgenda initialized")
     
@@ -249,15 +250,18 @@ Rules:
 - Maximum 5 suggestions"""
 
         try:
-            import anthropic
-            client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
-            message = client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=256,
+            import asyncio
+            from src.analysis.model_router import ModelRouter
+            result = await asyncio.to_thread(
+                ModelRouter().call,
+                prompt=prompt,
+                task_type="analysis",
                 temperature=0.3,
-                messages=[{"role": "user", "content": prompt}]
+                max_tokens=256,
             )
-            response = message.content[0].text
+            if not result.get("ok"):
+                return {"ok": False, "err": result.get("err", "LLM call failed")[:100]}
+            response = result.get("text", "")
             
             # Parse JSON array
             text = response.strip()
