@@ -60,8 +60,11 @@ class ModelRouter:
             "cost_per_1k_tokens": 0.00027,
             "base_url": "https://api.groq.com/openai/v1",
             "api_format": "openai",
-            "default_model": "llama-3.3-70b-versatile",
-            "models": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
+            # llama-3.3-70b-versatile retired on the developer tier (Jul 2026);
+            # gpt-oss-120b is the current free production model (reasoning —
+            # spends part of max_tokens on reasoning, keep budgets generous)
+            "default_model": "openai/gpt-oss-120b",
+            "models": ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3-32b"],
             "env_key": "GROQ_API_KEY",
             "max_tokens": 4096,
         },
